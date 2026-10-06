@@ -129,6 +129,8 @@ export function createBrain(a: Actor, patrol: Point[], behavior: Brain['behavior
 const ray = newRayHit();
 const flowOut: Point = { x: 0, z: 0 };
 const THINK_DT = 6 / 60;
+/** Metres within which an HVT reacts to gunfire/explosions. */
+const HVT_HEARING = 45;
 
 /** Per-tick AI: perception + decisions at 10 Hz (staggered), steering/aim/fire every tick. */
 export function updateBrain(w: SimWorld, a: Actor, dt: number): void {
@@ -240,6 +242,9 @@ export function hear(w: SimWorld, a: Actor, x: number, z: number, sourceId: numb
     return;
   }
   if (a.kind !== 'enemy') return;
+  // A high-value target only reacts to trouble it can plausibly hear (a gunshot across the
+  // whole map must not start his escape countdown while the player is 80+ m away).
+  if (br.behavior === 'hvt' && Math.hypot(x - a.x, z - a.z) > HVT_HEARING) return;
   const src = w.actorById(sourceId);
   if (src && src.team === 1) {
     // Ally fire: get curious, and if they're in combat so are we.
@@ -592,6 +597,7 @@ function steer(w: SimWorld, a: Actor, br: Brain, def: EnemyDef, dt: number): voi
     if (br.wantRepath && w.director.requestPath()) {
       br.wantRepath = false;
       br.path = w.nav.findPath(a.x, a.z, br.goalX, br.goalZ);
+      w.director.spendPath(w.nav.lastExpanded);
       br.pathIdx = 0;
       if (!br.path) {
         br.hasGoal = false;
@@ -893,6 +899,7 @@ function steerCivilian(w: SimWorld, a: Actor, br: Brain): void {
   if (br.wantRepath && w.director.requestPath()) {
     br.wantRepath = false;
     br.path = w.nav.findPath(a.x, a.z, br.goalX, br.goalZ, 2500);
+    w.director.spendPath(w.nav.lastExpanded);
     br.pathIdx = 0;
     if (!br.path) br.hasGoal = false;
   }

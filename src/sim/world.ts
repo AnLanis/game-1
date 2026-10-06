@@ -147,8 +147,15 @@ export class SimWorld {
     // Patrol followers trail their leader's route loosely.
     for (const squad of this.level.squads) void squad;
 
-    for (const c of this.level.civilians) this.spawnCivilian(c.x, c.z);
-    for (const p of this.level.pickups) this.addPickup(p.kind, p.x, p.z, 0);
+    // Procgen offsets civilians/pickups from sites by a few metres, which can land inside props.
+    for (const c of this.level.civilians) {
+      const pt = this.walkablePoint(c.x, c.z);
+      if (pt) this.spawnCivilian(pt.x, pt.z);
+    }
+    for (const p of this.level.pickups) {
+      const pt = this.walkablePoint(p.x, p.z);
+      if (pt) this.addPickup(p.kind, pt.x, pt.z, 0);
+    }
 
     this.objectives = new Objectives(this, config.objectives);
     this.objectives.start();
@@ -162,7 +169,9 @@ export class SimWorld {
 
   emit(e: SimEvent): void {
     this.events.push(e);
-    if (this.events.length > MAX_EVENTS) this.events.splice(0, this.events.length - MAX_EVENTS);
+    // Nobody draining (headless bots, paused presentation): drop the oldest half in one
+    // splice rather than shifting a 6000-entry array on every emit.
+    if (this.events.length > MAX_EVENTS) this.events.splice(0, this.events.length - MAX_EVENTS / 2);
   }
 
   drainEvents(out: SimEvent[]): SimEvent[] {
@@ -210,16 +219,24 @@ export class SimWorld {
     return { x: this.grid.centerX(i), z: this.grid.centerZ((k - i) / this.grid.w) };
   }
 
+  /**
+   * Exit an HVT runs for: away from the player, and far enough from the HVT that the
+   * run (plus the 8 s exit timer) gives the player a fair window to catch him.
+   */
   private farthestReinforcement(x: number, z: number): Point {
     let best = this.level.reinforcements[0] ?? { x, z };
     let bd = -1;
     const p = this.player;
-    for (const r of this.level.reinforcements) {
-      const d = Math.hypot(r.x - p.x, r.z - p.z) + Math.hypot(r.x - x, r.z - z) * 0.2;
-      if (d > bd && Math.hypot(r.x - x, r.z - z) > 18) {
-        bd = d;
-        best = r;
+    for (const minRun of [32, 18, 0]) {
+      for (const r of this.level.reinforcements) {
+        const run = Math.hypot(r.x - x, r.z - z);
+        const d = Math.hypot(r.x - p.x, r.z - p.z) + run * 0.2;
+        if (d > bd && run > minRun) {
+          bd = d;
+          best = r;
+        }
       }
+      if (bd >= 0) break;
     }
     return best;
   }

@@ -144,7 +144,7 @@ export class Objectives {
         o.progress = Math.min(1, o.count / o.target);
         o.detail = `${Math.min(o.count, o.target)}/${o.target} neutralized`;
         // Anti-frustration: ping the last few hostiles on radar.
-        if (o.target - o.count <= 3) for (const a of w.actors) if (a.alive && a.team === 1) a.radarUntil = w.tick + 30;
+        if (o.target - o.count <= 3) for (const a of w.actors) if (a.alive && a.team === 1) a.radarUntil = Math.max(a.radarUntil, w.tick + 30);
         if (o.count >= o.target || remaining === 0) this.completeCurrent();
         break;
       }
@@ -153,7 +153,12 @@ export class Objectives {
         const inside = Math.hypot(p.x - z.x, p.z - z.z) <= z.r;
         let contested = false;
         for (const a of w.actors) {
-          if (a.alive && a.team === 1 && Math.hypot(a.x - z.x, a.z - z.z) <= z.r) contested = true;
+          if (a.alive && a.team === 1 && Math.hypot(a.x - z.x, a.z - z.z) <= z.r) {
+            contested = true;
+            // Show whoever is contesting the zone on radar so the player can never be stuck
+            // "Contested" with nobody in sight (same anti-frustration as the last few hostiles).
+            a.radarUntil = Math.max(a.radarUntil, w.tick + 30);
+          }
         }
         o.contested = contested;
         const seconds = s.seconds ?? 20;
@@ -204,7 +209,9 @@ export class Objectives {
           break;
         }
         o.detail = t.brain?.state === 'flee' ? 'Target is fleeing!' : 'Eliminate the target';
-        if (s.escape && Math.hypot(t.x - s.escape.x, t.z - s.escape.z) < 2.5) {
+        // Procgen doesn't place an explicit exit, so the point the brain flees to is the escape route.
+        const esc = s.escape ?? (t.brain ? { x: t.brain.escapeX, z: t.brain.escapeZ } : null);
+        if (esc && t.brain?.state === 'flee' && Math.hypot(t.x - esc.x, t.z - esc.z) < 2.5) {
           o.escapeTimer += dt;
           o.detail = `Target escaping… ${Math.max(0, 8 - o.escapeTimer).toFixed(1)}s`;
           if (o.escapeTimer >= 8) this.failed = 'The target escaped';

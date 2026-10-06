@@ -41,12 +41,50 @@ export function generateLevel(biomeId: string, seed: number): GeneratedLevel {
   const dist = b.distanceField(layout.spawn.x, layout.spawn.z);
   let maxDist = 1;
   for (let k = 0; k < dist.length; k += 1) if (dist[k] > maxDist) maxDist = dist[k];
-  // Only keep sites that are reachable.
-  layout.sites = layout.sites.filter((s) => distAt(level, dist, s.x, s.z) >= 0);
-  layout.holds = layout.holds.filter((s) => distAt(level, dist, s.x, s.z) >= 0);
-  layout.extracts = layout.extracts.filter((s) => distAt(level, dist, s.x, s.z) >= 0);
-  level.reinforcements = level.reinforcements.filter((s) => distAt(level, dist, s.x, s.z) >= 0);
+  // Layouts place hold/extract/site anchors by coordinate; some land inside props or
+  // walls. Snap them to the nearest reachable cell rather than silently dropping them
+  // (dropping left some maps with no extraction point and objectives on arbitrary sites).
+  const snapAll = <T extends Point>(list: T[]): T[] => {
+    const out: T[] = [];
+    for (const s of list) {
+      const p = snapReachable(level, dist, s);
+      if (p) out.push({ ...s, x: p.x, z: p.z });
+    }
+    return out;
+  };
+  layout.sites = snapAll(layout.sites);
+  layout.holds = snapAll(layout.holds);
+  layout.extracts = snapAll(layout.extracts);
+  level.reinforcements = snapAll(level.reinforcements);
   return { level, layout, dist, maxDist };
+}
+
+/** Nearest reachable (dist >= 0) cell centre within `maxR` cells of a point; the point itself if already reachable. */
+export function snapReachable(level: LevelData, dist: Int32Array, p: Point, maxR = 12): Point | null {
+  const g = level.grid;
+  const i0 = g.cellX(p.x);
+  const j0 = g.cellZ(p.z);
+  if (!Number.isFinite(p.x) || !Number.isFinite(p.z)) return null;
+  if (g.inBounds(i0, j0) && dist[j0 * g.w + i0] >= 0) return p;
+  for (let r = 1; r <= maxR; r += 1) {
+    let best: Point | null = null;
+    let bd = Infinity;
+    for (let dj = -r; dj <= r; dj += 1) {
+      for (let di = -r; di <= r; di += 1) {
+        if (Math.max(Math.abs(di), Math.abs(dj)) !== r) continue;
+        const i = i0 + di;
+        const j = j0 + dj;
+        if (!g.inBounds(i, j) || dist[j * g.w + i] < 0) continue;
+        const d = di * di + dj * dj;
+        if (d < bd) {
+          bd = d;
+          best = { x: g.centerX(i), z: g.centerZ(j) };
+        }
+      }
+    }
+    if (best) return best;
+  }
+  return null;
 }
 
 function distAt(level: LevelData, dist: Int32Array, x: number, z: number): number {
@@ -110,12 +148,16 @@ export function planMission(req: PlanRequest): MissionConfig {
 
   const d = (p: Point): number => distAt(level, dist, p.x, p.z);
   const used: Point[] = [];
+  let lastStandCenter: Point = level.playerSpawn;
   const farEnough = (p: Point, min: number): boolean => used.every((u) => Math.hypot(u.x - p.x, u.z - p.z) >= min);
 
   if (lastStand) {
     // Defend the most central hold point.
     const center = layout.holds[0] ?? layout.sites[0] ?? level.playerSpawn;
-    level.playerSpawn = { x: center.x, z: center.z - 2, yaw: rng.range(-Math.PI, Math.PI) };
+    // Spawn 2 m off the centre, snapped onto reachable ground (the raw offset can land inside a prop).
+    const spawn = snapReachable(level, dist, { x: center.x, z: center.z - 2 }) ?? center;
+    level.playerSpawn = { x: spawn.x, z: spawn.z, yaw: rng.range(-Math.PI, Math.PI) };
+    lastStandCenter = { x: center.x, z: center.z };
   }
 
   const pickSites = (n: number, minFrac: number, prefer: Site['kind'][], spacing: number): Site[] => {
@@ -149,7 +191,7 @@ export function planMission(req: PlanRequest): MissionConfig {
       case 'hold':
       case 'survive': {
         const holds = [...layout.holds].sort((a, b) => Math.abs(d(a) / maxDist - 0.6) - Math.abs(d(b) / maxDist - 0.6));
-        const c = lastStand ? { x: level.playerSpawn.x, z: level.playerSpawn.z + 2 } : holds[0] ?? layout.sites[0];
+        const c = lastStand ? lastStandCenter : holds[0] ?? layout.sites[0] ?? level.playerSpawn;
         const lm = nearestLandmark(level, c);
         base.zone = { x: c.x, z: c.z, r: t.kind === 'survive' ? 14 : 6 };
         base.label = objectiveLabel(t, biome, lm ? `the ${lm}` : 'the zone');
@@ -158,7 +200,7 @@ export function planMission(req: PlanRequest): MissionConfig {
         break;
       }
       case 'extract': {
-        const ex = [...layout.extracts].sort((a, b) => d(b) - d(a))[0] ?? layout.sites[layout.sites.length - 1];
+        const ex = [...layout.extracts].sort((a, b) => d(b) - d(a))[0] ?? [...layout.sites].sort((a, b) => d(b) - d(a))[0] ?? level.playerSpawn;
         base.zone = { x: ex.x, z: ex.z, r: 4 };
         base.label = objectiveLabel(t, biome, '');
         break;

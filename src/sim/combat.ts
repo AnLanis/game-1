@@ -138,7 +138,7 @@ function fire(w: SimWorld, a: Actor, slot: WeaponSlot): void {
 
   const suppressed = Boolean(def.audio.suppressed);
   w.noise(a.x, a.z, suppressed ? 12 : 45 + def.audio.power * 25, a.id);
-  if (!suppressed) a.radarUntil = w.tick + 120;
+  if (!suppressed) a.radarUntil = Math.max(a.radarUntil, w.tick + 120);
 }
 
 /** Resolve one hitscan ray. Returns true if an actor was hit. */

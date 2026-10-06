@@ -1,4 +1,5 @@
 import { angleDiff, clamp, dampAngle, DEG, pitchTo, yawTo } from '../engine/math';
+import { mixSeed, Rng } from '../engine/rng';
 import { newRayHit } from './grid';
 import type { Point } from './level';
 import { eyeHeight } from './movement';
@@ -28,11 +29,17 @@ export class PlayerBot {
   private stuck = 0;
   private jumpTick = -999;
 
+  /** The bot's own dice: it must never draw from the world RNG, or recorded command streams could not be replayed. */
+  private readonly rng: Rng;
+
   constructor(
     private readonly w: SimWorld,
     private readonly skill = 1,
+    /** Varies the bot's choices (strafe direction) without touching the simulation. */
+    seed = 0,
   ) {
     this.yaw = w.player.yaw;
+    this.rng = new Rng(mixSeed(0xb07, seed));
   }
 
   next(): InputCmd {
@@ -51,10 +58,14 @@ export class PlayerBot {
 
     // Target selection every 6 ticks.
     if (w.tick % 6 === 0) this.targetId = this.pickTarget(ex, ey, ez);
-    const target = this.targetId >= 0 ? w.actorById(this.targetId) : undefined;
+    let target = this.targetId >= 0 ? w.actorById(this.targetId) : undefined;
+    // A fleeing HVT is chased flat out: ignore his bodyguards, shoot only him, never strafe.
+    const hvt = this.hvtTarget();
+    const chasing = hvt !== null && hvt.brain?.state === 'flee';
+    if (chasing && target && target !== hvt) target = undefined;
 
     // Goal: current objective marker, else nearest living hostile.
-    if (w.tick - this.pathTick > 60 || !this.path) this.plan();
+    if (w.tick - this.pathTick > 60 || (!this.path && w.tick - this.pathTick > 10)) this.plan();
 
     let lookYaw = this.yaw;
     let lookPitch = 0;
@@ -93,12 +104,12 @@ export class PlayerBot {
         }
       }
     }
-    const fighting = target && target.alive;
+    const fighting = target && target.alive && !chasing;
     if (fighting) {
       // Keep moving but slower; strafe a bit.
       if (w.tick - this.strafeTick > 50) {
         this.strafeTick = w.tick;
-        this.strafe = w.rng.next() < 0.5 ? -1 : 1;
+        this.strafe = this.rng.next() < 0.5 ? -1 : 1;
       }
       const tx = target!.x - p.x;
       const tz = target!.z - p.z;
@@ -131,7 +142,9 @@ export class PlayerBot {
     }
 
     // Shooting.
-    if (fighting && slot) {
+    // While chasing, hold fire until the HVT is in decent range so the bot keeps sprinting.
+    const shooting = target && target.alive && (!chasing || Math.hypot(target.x - p.x, target.z - p.z) < 28);
+    if (shooting && slot) {
       const aligned = Math.abs(angleDiff(p.yaw, lookYaw)) < 4 * DEG;
       if (aligned && slot.mag > 0) {
         if (slot.def.auto || (p.prevButtons & Btn.Fire) === 0) cmd.buttons |= Btn.Fire;
@@ -151,6 +164,9 @@ export class PlayerBot {
 
   private pickTarget(ex: number, ey: number, ez: number): number {
     const w = this.w;
+    // The HVT outranks his bodyguards whenever we have a shot at him.
+    const hvt = this.hvtTarget();
+    if (hvt && Math.hypot(hvt.x - ex, hvt.z - ez) < 70 && w.grid.lineOfSight(ex, ey, ez, hvt.x, hvt.y + hvt.height * 0.7, hvt.z, ray)) return hvt.id;
     let best = -1;
     let bd = 70;
     for (const a of w.actors) {
@@ -164,55 +180,59 @@ export class PlayerBot {
     return best;
   }
 
+  /** The living HVT while the manhunt objective is active. */
+  private hvtTarget(): Actor | null {
+    const o = this.w.objectives.current;
+    if (!o || o.spec.kind !== 'hvt') return null;
+    const t = this.w.actorById(o.actorId);
+    return t && t.alive ? t : null;
+  }
+
   private plan(): void {
     const w = this.w;
     const p = w.player;
     this.pathTick = w.tick;
-    const goal = this.pickGoal(p);
-    this.goal = goal;
-    if (!goal) {
-      this.path = null;
-      return;
-    }
-    this.path = w.nav.findPath(p.x, p.z, goal.x, goal.z, 12000);
+    this.goal = null;
+    this.path = null;
     this.pathIdx = 0;
+    // Try the best few candidates: an unreachable "nearest" hostile must not park the bot forever.
+    const goals = this.pickGoals(p);
+    for (let n = 0; n < goals.length && n < 4; n += 1) {
+      const path = w.nav.findPath(p.x, p.z, goals[n].x, goals[n].z, 12000);
+      if (path) {
+        this.goal = goals[n];
+        this.path = path;
+        return;
+      }
+    }
   }
 
-  private pickGoal(p: Actor): Point | null {
+  /** Candidate destinations for the current objective, best first. */
+  private pickGoals(p: Actor): Point[] {
     const w = this.w;
     const o = w.objectives.current;
-    if (!o) return null;
-    const markers = w.markers();
+    if (!o) return [];
     if (o.spec.kind === 'eliminate' || o.spec.kind === 'survive') {
-      let best: Actor | null = null;
-      let bd = Infinity;
-      for (const a of w.actors) {
-        if (!a.alive || a.team !== 1) continue;
-        const d = Math.hypot(a.x - p.x, a.z - p.z);
-        if (d < bd) {
-          bd = d;
-          best = a;
-        }
-      }
-      return best ? { x: best.x, z: best.z } : o.spec.zone ?? null;
+      const hostiles = w.actors.filter((a) => a.alive && a.team === 1).sort((a, b) => Math.hypot(a.x - p.x, a.z - p.z) - Math.hypot(b.x - p.x, b.z - p.z) || a.id - b.id);
+      const out: Point[] = hostiles.map((a) => ({ x: a.x, z: a.z }));
+      if (o.spec.zone) out.push(o.spec.zone);
+      return out;
     }
     if (o.spec.kind === 'hold' && o.spec.zone) {
+      const zone = o.spec.zone;
       // Clear contesting enemies first.
       if (o.contested) {
-        for (const a of w.actors) if (a.alive && a.team === 1 && Math.hypot(a.x - o.spec.zone.x, a.z - o.spec.zone.z) <= o.spec.zone.r + 2) return { x: a.x, z: a.z };
+        const inZone = w.actors.filter((a) => a.alive && a.team === 1 && Math.hypot(a.x - zone.x, a.z - zone.z) <= zone.r + 2);
+        if (inZone.length) return inZone.map((a) => ({ x: a.x, z: a.z })).concat([{ x: zone.x, z: zone.z }]);
       }
-      return { x: o.spec.zone.x, z: o.spec.zone.z };
+      return [{ x: zone.x, z: zone.z }];
     }
-    let best: Point | null = null;
-    let bd = Infinity;
-    for (const m of markers) {
-      const d = Math.hypot(m.x - p.x, m.z - p.z);
-      if (d < bd) {
-        bd = d;
-        best = { x: m.x, z: m.z };
-      }
-    }
-    return best;
+    // The escorted hostage is also listed as a marker while another objective is active;
+    // it follows us anyway, so never treat it as the destination (the bot would just idle beside it).
+    const wantKind = o.spec.kind === 'extract' ? 'extract' : null;
+    const markers = w.markers().filter((m) => (wantKind ? m.kind === wantKind : m.kind !== 'hostage' || o.spec.kind === 'rescue'));
+    markers.sort((a, b) => Math.hypot(a.x - p.x, a.z - p.z) - Math.hypot(b.x - p.x, b.z - p.z));
+    return markers.map((m) => ({ x: m.x, z: m.z }));
   }
 
   get currentGoal(): Point | null {

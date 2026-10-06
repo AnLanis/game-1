@@ -33,6 +33,7 @@ export class Director {
   private readonly pending: PendingSpawn[] = [];
   private grenadeReadyTick = 0;
   private pathBudget = 0;
+  private expandBudget = 0;
   private flowCell = -1;
   private flowTick = 0;
 
@@ -53,14 +54,20 @@ export class Director {
   }
 
   requestPath(): boolean {
-    if (this.pathBudget <= 0) return false;
+    if (this.pathBudget <= 0 || this.expandBudget <= 0) return false;
     this.pathBudget -= 1;
     return true;
+  }
+
+  /** Charge the A* work a path query actually cost; long routes starve later requests this tick. */
+  spendPath(expanded: number): void {
+    this.expandBudget -= expanded;
   }
 
   update(dt: number): void {
     const w = this.w;
     this.pathBudget = 8;
+    this.expandBudget = 3500;
     this.intensity = Math.max(0, this.intensity - dt * 0.08);
     if (w.tick % 6 === 0) this.assignTokens();
     if (w.tick % 30 === 0) this.assignFlankers();
@@ -79,6 +86,10 @@ export class Director {
       s.delay -= dt;
       if (s.delay > 0) continue;
       this.pending.splice(n, 1);
+      // Last line of defence: never materialise inside geometry.
+      const at = w.grid.walkable(w.grid.cellX(s.x), w.grid.cellZ(s.z)) ? s : (w.walkablePoint(s.x, s.z) ?? s);
+      s.x = at.x;
+      s.z = at.z;
       const a = w.spawnEnemy(s.defId, s.x, s.z, 'reinforcement');
       const br = a.brain!;
       br.lastKnownX = s.focusX;
@@ -164,10 +175,14 @@ export class Director {
       if (heavy && n === 0 && Enemies.has('juggernaut')) defId = 'juggernaut';
       const pt = points[n % points.length];
       const jitter = (n / points.length) | 0;
+      // Stagger stacked spawns sideways, but never into a wall/border cell.
+      const jx = pt.x + (jitter % 2) * 0.8;
+      const jz = pt.z + ((jitter >> 1) % 2) * 0.8;
+      const ok = w.grid.walkable(w.grid.cellX(jx), w.grid.cellZ(jz));
       this.pending.push({
         defId,
-        x: pt.x + (jitter % 2) * 0.8,
-        z: pt.z + ((jitter >> 1) % 2) * 0.8,
+        x: ok ? jx : pt.x,
+        z: ok ? jz : pt.z,
         delay: 0.2 + n * 0.45,
         focusX: focus.x,
         focusZ: focus.z,

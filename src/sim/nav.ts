@@ -90,6 +90,8 @@ export class NavGrid {
   private readonly g: Float32Array;
   private readonly came: Int32Array;
   private readonly gen: Uint32Array;
+  /** Generation stamp of nodes already expanded in the current query (closed set). */
+  private readonly closed: Uint32Array;
   private generation = 1;
   private readonly heap: MinHeap;
   /** Flow field: distance (m) from the target cell, Infinity if unreachable. */
@@ -98,6 +100,8 @@ export class NavGrid {
   private readonly flowHeap: MinHeap;
   covers: CoverPoint[] = [];
   private coverVersion = -1;
+  /** Nodes expanded by the most recent findPath (lets the Director budget path cost per tick). */
+  lastExpanded = 0;
   /** Cells that are walkable AND connected to the player spawn. */
   readonly reachable: Uint8Array;
 
@@ -106,6 +110,7 @@ export class NavGrid {
     this.g = new Float32Array(n);
     this.came = new Int32Array(n);
     this.gen = new Uint32Array(n);
+    this.closed = new Uint32Array(n);
     this.heap = new MinHeap(1024);
     this.flowHeap = new MinHeap(1024);
     this.flow = new Float32Array(n).fill(Infinity);
@@ -166,9 +171,10 @@ export class NavGrid {
    * A* from world point to world point. Returns smoothed waypoints (excluding
    * start) or null when unreachable. `maxExpand` caps work per query.
    */
-  findPath(sx: number, sz: number, tx: number, tz: number, maxExpand = 6000): Point[] | null {
+  findPath(sx: number, sz: number, tx: number, tz: number, maxExpand = Infinity): Point[] | null {
     const grid = this.grid;
     const w = grid.w;
+    this.lastExpanded = 0;
     const start = this.nearestWalkable(grid.cellX(sx), grid.cellZ(sz), 3);
     const goal = this.nearestWalkable(grid.cellX(tx), grid.cellZ(tz), 6);
     if (start < 0 || goal < 0) return null;
@@ -176,6 +182,7 @@ export class NavGrid {
     this.generation += 1;
     if (this.generation > 0xfffffff0) {
       this.gen.fill(0);
+      this.closed.fill(0);
       this.generation = 1;
     }
     const gen = this.generation;
@@ -195,6 +202,10 @@ export class NavGrid {
         found = true;
         break;
       }
+      // Lazy-deletion heap: skip stale duplicates so every cell is expanded at most once.
+      // (Without this a 90 m route on a cluttered 88x88 map re-expanded >12k nodes.)
+      if (this.closed[k] === gen) continue;
+      this.closed[k] = gen;
       if (++expanded > maxExpand) break;
       const i = k % w;
       const j = (k - i) / w;
@@ -214,6 +225,7 @@ export class NavGrid {
         heap.push(nk, ng + h * 1.001);
       }
     }
+    this.lastExpanded = expanded;
     if (!found) return null;
     const cells: number[] = [];
     for (let k = goal; k !== -1; k = this.came[k]) cells.push(k);
